@@ -95,9 +95,10 @@ def should_explore(link: str, dtcs_prefix: str, include_dtcs: bool) -> bool:
     return include_dtcs or not link.startswith(dtcs_prefix)
 
 
-def save_leaf(content_div, url: str, path: str, output_dir: Path) -> dict:
+def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
+    """Write a leaf document's title/breadcrumb/text/html as JSON under output_dir, mirroring its URL path."""
     title_tag = content_div.find("h1")
-    title = title_tag.get_text(strip=True) if title_tag else path
+    title = title_tag.get_text(strip=True) if title_tag else url_path
 
     breadcrumbs_div = content_div.find("div", id="breadcrumbs")
     if breadcrumbs_div:
@@ -117,7 +118,7 @@ def save_leaf(content_div, url: str, path: str, output_dir: Path) -> dict:
         "html": str(nested_html),
     }
 
-    rel_path = path.strip("/") + ".json"
+    rel_path = url_path.strip("/") + ".json"
     out_file = output_dir / rel_path
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -141,55 +142,56 @@ def crawl(
     visited: set[str] = set()
     manifest: list[dict] = []
 
-    while queue:
-        if max_pages is not None and len(visited) >= max_pages:
-            print(f"Reached --max-pages limit ({max_pages}), stopping.")
-            break
+    # try/finally ensures the manifest is written even if the crawl is interrupted
+    try:
+        while queue:
+            if max_pages is not None and len(visited) >= max_pages:
+                print(f"Reached --max-pages limit ({max_pages}), stopping.")
+                break
 
-        url = queue.popleft()
+            url = queue.popleft()
 
-        # Add current URL to visited set to avoid reprocessing it
-        if url in visited:
-            continue
-        visited.add(url)
+            # Add current URL to visited set to avoid reprocessing it
+            if url in visited:
+                continue
+            visited.add(url)
 
-        # Check if URL is allowed by robots.txt before fetching
-        if not rp.can_fetch(USER_AGENT, url):
-            print(f"  [robots.txt disallow] {url}")
-            continue
+            # Check if URL is allowed by robots.txt before fetching
+            if not rp.can_fetch(USER_AGENT, url):
+                print(f"  [robots.txt disallow] {url}")
+                continue
 
-        # Fetch enqued URL
-        print(f"[{len(visited)}] {url}")
-        html = fetch(session, url)
-        time.sleep(delay)
-        if html is None:
-            continue
+            # Fetch enqued URL
+            print(f"[{len(visited)}] {url}")
+            html = fetch(session, url)
+            time.sleep(delay)
+            if html is None:
+                continue
 
-        # Parse HTML and find relevant content div
-        soup = BeautifulSoup(html, "html.parser")
-        content_div = soup.find("div", id="content")
-        if content_div is None:
-            continue
-        path = urlparse(url).path
+            # Parse HTML and find relevant content div
+            soup = BeautifulSoup(html, "html.parser")
+            content_div = soup.find("div", id="content")
+            if content_div is None:
+                continue
+            path = urlparse(url).path
 
-        if is_leaf(content_div):
-            # Add leaf document to manifest
-            entry = save_leaf(content_div, url, path, output_dir)
-            manifest.append(entry)
-        else:
-            # Enqueue links found on non-leaf pages for further crawling
-            links = extract_links(content_div, url, scope_prefix)
-            for link in links:
-                if should_explore(link, dtcs_prefix, include_dtcs) and link not in visited:
-                    queue.append(link)
+            if is_leaf(content_div):
+                # Save leaf document as JSON and add to manifest
+                entry = save_leaf(content_div, url, path, output_dir)
+                manifest.append(entry)
+            else:
+                # Enqueue links found on non-leaf pages for further crawling
+                links = extract_links(content_div, url, scope_prefix)
+                for link in links:
+                    if should_explore(link, dtcs_prefix, include_dtcs) and link not in visited:
+                        queue.append(link)
+    finally:
+        manifest_file = output_dir / model / year / "manifest.json"
+        manifest_file.parent.mkdir(parents=True, exist_ok=True)
+        manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # Create and write the manifest.json file
-    manifest_file = output_dir / model / year / "manifest.json"
-    manifest_file.parent.mkdir(parents=True, exist_ok=True)
-    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    print(f"\nDone. Saved {len(manifest)} documents ({len(visited)} pages visited).")
-    print(f"Manifest: {manifest_file}")
+        print(f"\nSaved {len(manifest)} documents ({len(visited)} pages visited).")
+        print(f"Manifest: {manifest_file}")
 
 
 def main() -> None:
