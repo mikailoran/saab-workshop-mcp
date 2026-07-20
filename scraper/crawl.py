@@ -13,6 +13,7 @@ Usage:
     python crawl.py --model 9-5-9600 --year 2010
     python crawl.py --max-pages 20 --delay 1.5    # quick/polite test run
     python crawl.py --dtcs                        # also crawl the (large) DTCs section
+    python crawl.py --dfs                          # crawl depth-first instead of breadth-first
 """
 
 import argparse
@@ -54,6 +55,25 @@ def fetch(session: requests.Session, url: str, retries: int = 3) -> str | None:
             print(f"  [error] {url}: {exc} (attempt {attempt}/{retries})")
         time.sleep(2**attempt)
     return None
+
+
+def fetch_content_div(session: requests.Session, url: str):
+    """Fetch url and return its parsed #content div, or None if the page can't be used.
+
+    Args:
+        session: requests session to fetch with.
+        url: absolute URL to fetch.
+
+    Returns:
+        The page's #content div (a bs4 Tag) or None if the fetch failed or the
+        page has no #content div.
+    """
+    html = fetch(session, url)
+    if html is None:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find("div", id="content")
 
 
 def is_leaf(content_div) -> bool:
@@ -127,7 +147,13 @@ def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
 
 
 def crawl(
-    model: str, year: str, output_dir: Path, delay: float, max_pages: int | None, include_dtcs: bool = False
+    model: str,
+    year: str,
+    output_dir: Path,
+    delay: float,
+    max_pages: int | None,
+    include_dtcs: bool = False,
+    dfs: bool = False,
 ) -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -149,7 +175,8 @@ def crawl(
                 print(f"Reached --max-pages limit ({max_pages}), stopping.")
                 break
 
-            url = queue.popleft()
+            # deque as FIFO (popleft) gives BFS; as LIFO (pop) gives DFS
+            url = queue.pop() if dfs else queue.popleft()
 
             # Add current URL to visited set to avoid reprocessing it
             if url in visited:
@@ -161,16 +188,11 @@ def crawl(
                 print(f"  [robots.txt disallow] {url}")
                 continue
 
-            # Fetch enqued URL
+            # Fetch and parse enqueued URL 
             print(f"[{len(visited)}] {url}")
-            html = fetch(session, url)
+            content_div = fetch_content_div(session, url)
+            # Sleep between requests
             time.sleep(delay)
-            if html is None:
-                continue
-
-            # Parse HTML and find relevant content div
-            soup = BeautifulSoup(html, "html.parser")
-            content_div = soup.find("div", id="content")
             if content_div is None:
                 continue
             path = urlparse(url).path
@@ -202,10 +224,11 @@ def main() -> None:
     parser.add_argument("--delay", default=1.0, type=float, help="seconds to wait between requests")
     parser.add_argument("--max-pages", default=None, type=int, help="stop after visiting this many pages (for testing)")
     parser.add_argument("--dtcs", action="store_true", help="also crawl the (large) Diagnostic Trouble Codes section")
+    parser.add_argument("--dfs", action="store_true", help="crawl depth-first instead of the default breadth-first")
     args = parser.parse_args()
 
     try:
-        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, args.dtcs)
+        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, args.dtcs, args.dfs)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(1)
