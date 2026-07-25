@@ -22,7 +22,7 @@ import sys
 import time
 import urllib.robotparser as robotparser
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -137,7 +137,29 @@ def should_skip(link: str, filters: CrawlFilters) -> bool:
     return skip
 
 
-def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
+# TODO: refactor dataclasses duplicated in server/ingest.py
+@dataclass(frozen=True)
+class LeafRecord:
+    """A leaf document's scraped content, as saved to its JSON file."""
+
+    url: str
+    title: str
+    breadcrumb: str
+    text: str
+    html: str
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """One manifest.json entry, pointing at a saved leaf document's JSON file."""
+
+    url: str
+    title: str
+    breadcrumb: str
+    file: str
+
+
+def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> ManifestEntry:
     """Write a leaf document's title/breadcrumb/text/html as JSON under output_dir, mirroring its URL path."""
     title_tag = content_div.find("h1")
     title = title_tag.get_text(strip=True) if title_tag else url_path
@@ -152,20 +174,14 @@ def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
     nested_html = content_div.find("html")
     text = clean_text(nested_html)
 
-    record = {
-        "url": url,
-        "title": title,
-        "breadcrumb": breadcrumb,
-        "text": text,
-        "html": str(nested_html),
-    }
+    record = LeafRecord(url, title, breadcrumb, text, str(nested_html))
 
     rel_path = url_path.strip("/") + ".json"
     out_file = output_dir / rel_path
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    out_file.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    out_file.write_text(json.dumps(asdict(record), indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return {"url": url, "title": title, "breadcrumb": breadcrumb, "file": str(out_file.relative_to(output_dir))}
+    return ManifestEntry(url, title, breadcrumb, str(out_file.relative_to(output_dir)))
 
 
 def update_last_run_symlink(output_dir: Path, symlink_name: str = "data_last_run") -> Path:
@@ -209,8 +225,7 @@ def crawl(
 
     queue: deque[str] = deque([start_url])
     visited: set[str] = set()
-    visited_leaves = 0
-    manifest: list[dict] = []
+    manifest: list[ManifestEntry] = []
 
     # try/finally ensures the manifest is written even if the crawl is interrupted
     try:
@@ -245,8 +260,7 @@ def crawl(
                 # Save leaf document as JSON and add to manifest
                 entry = save_leaf(content_div, url, path, output_dir)
                 manifest.append(entry)
-                visited_leaves += 1
-                if max_leaves is not None and visited_leaves >= max_leaves:
+                if max_leaves is not None and len(manifest) >= max_leaves:
                     print(f"Reached --max-docs limit ({max_leaves}), stopping.")
                     break
             else:
@@ -258,11 +272,13 @@ def crawl(
     finally:
         manifest_file = output_dir / model / year / "manifest.json"
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
-        manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        manifest_json = json.dumps([asdict(e) for e in manifest], indent=2, ensure_ascii=False)
+        manifest_file.write_text(manifest_json, encoding="utf-8")
 
         symlink_path = update_last_run_symlink(output_dir)
 
         print(f"\nSaved {len(manifest)} documents ({len(visited)} pages visited).")
+        print(f"Data written to: {output_dir}")
         print(f"Manifest: {manifest_file}")
         print(f"Symlink:  {symlink_path} -> {output_dir}")
 
