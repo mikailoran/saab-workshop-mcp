@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.robotparser as robotparser
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -110,9 +111,29 @@ def extract_links(content_div, current_url: str, scope_prefix: str) -> list[str]
     return links
 
 
-def should_explore(link: str, dtcs_prefix: str, include_dtcs: bool) -> bool:
-    """Whether a discovered link should be queued, based on the script's crawl filters."""
-    return include_dtcs or not link.startswith(dtcs_prefix)
+@dataclass(frozen=True)
+class CrawlFilters:
+    """Bundles the crawl's opt-in/opt-out link filters.
+
+    Kept as one object (rather than one should_explore() parameter per
+    filter) so future filters can be added here without growing that
+    function's argument list.
+
+    Attributes:
+        dtcs_prefix: URL prefix of the DTCs section for the requested model/year.
+        skip_dtcs: whether links under dtcs_prefix should be skipped.
+    """
+
+    dtcs_prefix: str
+    skip_dtcs: bool
+
+
+def should_skip(link: str, filters: CrawlFilters) -> bool:
+    """Whether a discovered link should be skipped, based on the crawl's filters."""
+    skip = False
+    if filters.skip_dtcs:
+        skip |= link.startswith(filters.dtcs_prefix)
+    return skip
 
 
 def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
@@ -152,7 +173,7 @@ def crawl(
     output_dir: Path,
     delay: float,
     max_pages: int | None,
-    include_dtcs: bool = False,
+    filters: CrawlFilters,
     dfs: bool = False,
 ) -> None:
     session = requests.Session()
@@ -162,7 +183,6 @@ def crawl(
 
     scope_prefix = f"/{model}/{year}/"
     start_url = f"{BASE_URL}{scope_prefix}"
-    dtcs_prefix = f"{BASE_URL}{scope_prefix}dtcs/"
 
     queue: deque[str] = deque([start_url])
     visited: set[str] = set()
@@ -188,7 +208,7 @@ def crawl(
                 print(f"  [robots.txt disallow] {url}")
                 continue
 
-            # Fetch and parse enqueued URL 
+            # Fetch and parse enqueued URL
             print(f"[{len(visited)}] {url}")
             content_div = fetch_content_div(session, url)
             # Sleep between requests
@@ -205,7 +225,7 @@ def crawl(
                 # Enqueue links found on non-leaf pages for further crawling
                 links = extract_links(content_div, url, scope_prefix)
                 for link in links:
-                    if should_explore(link, dtcs_prefix, include_dtcs) and link not in visited:
+                    if not should_skip(link, filters) and link not in visited:
                         queue.append(link)
     finally:
         manifest_file = output_dir / model / year / "manifest.json"
@@ -223,12 +243,17 @@ def main() -> None:
     parser.add_argument("--output-dir", default="data", type=Path, help="where to write scraped JSON documents")
     parser.add_argument("--delay", default=1.0, type=float, help="seconds to wait between requests")
     parser.add_argument("--max-pages", default=None, type=int, help="stop after visiting this many pages (for testing)")
-    parser.add_argument("--dtcs", action="store_true", help="also crawl the (large) Diagnostic Trouble Codes section")
+    parser.add_argument("--skip-dtcs", action="store_true", help="skip the Diagnostic Trouble Codes section")
     parser.add_argument("--dfs", action="store_true", help="crawl depth-first instead of the default breadth-first")
     args = parser.parse_args()
 
+    filters = CrawlFilters(
+        dtcs_prefix=f"{BASE_URL}/{args.model}/{args.year}/dtcs/",
+        skip_dtcs=args.skip_dtcs,
+    )
+
     try:
-        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, args.dtcs, args.dfs)
+        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, filters, args.dfs)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(1)
