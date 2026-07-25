@@ -9,11 +9,11 @@ listing every saved document is written alongside them for the later RAG
 ingestion step.
 
 Usage:
-    python crawl.py                              # defaults: 9-3-9440 / 2007
+    python crawl.py                                 # defaults: 9-3-9440 / 2007
     python crawl.py --model 9-5-9600 --year 2010
-    python crawl.py --max-pages 20 --delay 1.5    # quick/polite test run
-    python crawl.py --dtcs                        # also crawl the (large) DTCs section
-    python crawl.py --dfs                          # crawl depth-first instead of breadth-first
+    python crawl.py --max-docs 20 --delay 1.5       # quick/polite test run
+    python crawl.py --skip-dtcs                     # skip the DTCs section
+    python crawl.py --dfs                           # crawl depth-first instead of breadth-first
 """
 
 import argparse
@@ -23,6 +23,7 @@ import time
 import urllib.robotparser as robotparser
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -167,12 +168,34 @@ def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> dict:
     return {"url": url, "title": title, "breadcrumb": breadcrumb, "file": str(out_file.relative_to(output_dir))}
 
 
+def update_last_run_symlink(output_dir: Path, symlink_name: str = "data_last_run") -> Path:
+    """Point symlink_name (as a sibling of output_dir) at output_dir, replacing any previous target.
+
+    Creates a symlink pointing to the crawl's last run's output directory.
+    Created as a sibling of output_dir.
+
+    Args:
+        output_dir: the crawl's (dated) output directory to point the symlink at.
+        symlink_name: name of the symlink.
+
+    Returns:
+        The symlink's path.
+    """
+    symlink_path = output_dir.parent / symlink_name
+    if symlink_path.is_symlink() or symlink_path.exists():
+        symlink_path.unlink()
+    target = output_dir.relative_to(symlink_path.parent)
+    symlink_path.symlink_to(target, target_is_directory=True)
+    return symlink_path
+
+
 def crawl(
     model: str,
     year: str,
     output_dir: Path,
     delay: float,
     max_pages: int | None,
+    max_leaves: int | None,
     filters: CrawlFilters,
     dfs: bool = False,
 ) -> None:
@@ -186,6 +209,7 @@ def crawl(
 
     queue: deque[str] = deque([start_url])
     visited: set[str] = set()
+    visited_leaves = 0
     manifest: list[dict] = []
 
     # try/finally ensures the manifest is written even if the crawl is interrupted
@@ -221,6 +245,10 @@ def crawl(
                 # Save leaf document as JSON and add to manifest
                 entry = save_leaf(content_div, url, path, output_dir)
                 manifest.append(entry)
+                visited_leaves += 1
+                if max_leaves is not None and visited_leaves >= max_leaves:
+                    print(f"Reached --max-docs limit ({max_leaves}), stopping.")
+                    break
             else:
                 # Enqueue links found on non-leaf pages for further crawling
                 links = extract_links(content_div, url, scope_prefix)
@@ -232,17 +260,28 @@ def crawl(
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
         manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
+        symlink_path = update_last_run_symlink(output_dir)
+
         print(f"\nSaved {len(manifest)} documents ({len(visited)} pages visited).")
         print(f"Manifest: {manifest_file}")
+        print(f"Symlink:  {symlink_path} -> {output_dir}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="9-3-9440", help="model/chassis slug, e.g. 9-3-9440")
     parser.add_argument("--year", default="2007", help="model year, e.g. 2007")
-    parser.add_argument("--output-dir", default="data", type=Path, help="where to write scraped JSON documents")
+    parser.add_argument(
+        "--output-dir",
+        default=f"data_{datetime.now():%Y-%m-%d_%H-%M-%S}",
+        type=Path,
+        help="where to write scraped JSON documents (defaults to a dated dir)",
+    )
     parser.add_argument("--delay", default=1.0, type=float, help="seconds to wait between requests")
-    parser.add_argument("--max-pages", default=None, type=int, help="stop after visiting this many pages (for testing)")
+    parser.add_argument(
+        "--max-pages", default=None, type=int, help="stop after visiting this many pages (technical doc or folder)"
+    )
+    parser.add_argument("--max-docs", default=None, type=int, help="stop after visiting this many technical documents")
     parser.add_argument("--skip-dtcs", action="store_true", help="skip the Diagnostic Trouble Codes section")
     parser.add_argument("--dfs", action="store_true", help="crawl depth-first instead of the default breadth-first")
     args = parser.parse_args()
@@ -253,7 +292,7 @@ def main() -> None:
     )
 
     try:
-        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, filters, args.dfs)
+        crawl(args.model, args.year, args.output_dir, args.delay, args.max_pages, args.max_docs, filters, args.dfs)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(1)
