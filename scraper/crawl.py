@@ -149,18 +149,12 @@ class LeafRecord:
     html: str
 
 
-@dataclass(frozen=True)
-class ManifestEntry:
-    """One manifest.json entry, pointing at a saved leaf document's JSON file."""
+def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> Path:
+    """Write a leaf document's title/breadcrumb/text/html as JSON under output_dir, mirroring its URL path.
 
-    url: str
-    title: str
-    breadcrumb: str
-    file: str
-
-
-def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> ManifestEntry:
-    """Write a leaf document's title/breadcrumb/text/html as JSON under output_dir, mirroring its URL path."""
+    Returns:
+        The written file's path relative to output_dir, for the manifest.
+    """
     title_tag = content_div.find("h1")
     title = title_tag.get_text(strip=True) if title_tag else url_path
 
@@ -181,7 +175,7 @@ def save_leaf(content_div, url: str, url_path: str, output_dir: Path) -> Manifes
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(asdict(record), indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return ManifestEntry(url, title, breadcrumb, str(out_file.relative_to(output_dir)))
+    return out_file.relative_to(output_dir)
 
 
 def update_last_run_symlink(output_dir: Path, symlink_name: str = "data_last_run") -> Path:
@@ -225,7 +219,7 @@ def crawl(
 
     queue: deque[str] = deque([start_url])
     visited: set[str] = set()
-    manifest: list[ManifestEntry] = []
+    manifest: list[str] = []
 
     # try/finally ensures the manifest is written even if the crawl is interrupted
     try:
@@ -258,8 +252,8 @@ def crawl(
 
             if is_leaf(content_div):
                 # Save leaf document as JSON and add to manifest
-                entry = save_leaf(content_div, url, path, output_dir)
-                manifest.append(entry)
+                leaf_path = save_leaf(content_div, url, path, output_dir)
+                manifest.append(str(leaf_path))
                 if max_leaves is not None and len(manifest) >= max_leaves:
                     print(f"Reached --max-docs limit ({max_leaves}), stopping.")
                     break
@@ -272,7 +266,7 @@ def crawl(
     finally:
         manifest_file = output_dir / model / year / "manifest.json"
         manifest_file.parent.mkdir(parents=True, exist_ok=True)
-        manifest_json = json.dumps([asdict(e) for e in manifest], indent=2, ensure_ascii=False)
+        manifest_json = json.dumps(manifest, indent=2, ensure_ascii=False)
         manifest_file.write_text(manifest_json, encoding="utf-8")
 
         symlink_path = update_last_run_symlink(output_dir)
