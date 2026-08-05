@@ -1,7 +1,8 @@
-# saab-rag
+# saab-workshop-mcp
 
-An MCP server that lets Claude answer Saab maintenance and repair questions by
-searching the official Saab WIS (Workshop Information System) documentation.
+An MCP server that lets an AI assistant answer Saab maintenance and repair
+questions by searching the official Saab WIS (Workshop Information System)
+documentation.
 
 ## Introduction
 
@@ -11,9 +12,15 @@ codes. It's an excellent resource, but it's a folder tree you have to navigate
 by hand, and you need to already know where a procedure lives to find it.
 
 This project makes that corpus searchable in natural language from inside a
-conversation with Claude. Ask "how do I bleed the brakes on a 2007 9-3?" and
-Claude retrieves the relevant passages from the manual — with links back to the
-source page — instead of guessing from memory.
+conversation with an AI assistant. Ask "how do I bleed the brakes on a 2007
+9-3?" and the assistant retrieves the relevant passages from the manual — with
+links back to the source page — instead of guessing from memory.
+
+It speaks the [Model Context Protocol](https://modelcontextprotocol.io), an open
+standard for exposing tools to language models, so it works with any
+MCP-compatible client — desktop assistants, coding agents, editor integrations,
+and agent frameworks alike — regardless of which model is behind it. Nothing in
+the server is tied to a particular vendor.
 
 It works in three stages:
 
@@ -21,7 +28,7 @@ It works in three stages:
 | --- | --- | --- |
 | 1. Crawl | [scraper/crawl.py](scraper/crawl.py) | Walks a model/year subtree of saabwisonline.com and saves each procedure as JSON |
 | 2. Ingest | [server/ingest.py](server/ingest.py) | Chunks the documents, embeds them locally, and builds a Chroma vector store |
-| 3. Serve | [server/mcp_server.py](server/mcp_server.py) | Exposes `search_saab_manual(query, k)` as an MCP tool for Claude |
+| 3. Serve | [server/mcp_server.py](server/mcp_server.py) | Exposes `search_saab_manual(query, k)` as an MCP tool |
 
 Everything runs locally. Embeddings are computed on-device with
 [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) via
@@ -100,19 +107,20 @@ Sanity-check the result without involving MCP at all:
 python retrieval.py "how do I replace the oil sump" --k 5
 ```
 
-### 3. Connect it to Claude
+### 3. Connect it to an MCP client
 
-**Claude Code** (stdio transport — the server runs as a local subprocess):
+The server supports both MCP transports. Which one you need depends on whether
+your client runs on the same machine as the index:
 
-```bash
-claude mcp add saab-manual -- /absolute/path/to/server/.venv/bin/python3 \
-                              /absolute/path/to/server/mcp_server.py
-```
+| Transport | How it works | Use it when |
+| --- | --- | --- |
+| **stdio** (default) | The client spawns the server as a local subprocess and talks over stdin/stdout | The client runs on the same machine — desktop assistants, coding agents, editor integrations |
+| **Streamable HTTP** | The client connects to a URL over the network | The client is hosted/browser-based, or you're sharing one server with several people |
 
-Restart your session, then ask Claude a maintenance question. Verify the
-connection with `claude mcp list`.
+#### Local (stdio)
 
-**Claude Desktop**: add the equivalent entry to `claude_desktop_config.json`:
+Most clients read the same `mcpServers` configuration shape. Add an entry
+pointing at the virtualenv's interpreter and the server script:
 
 ```json
 {
@@ -125,15 +133,28 @@ connection with `claude mcp list`.
 }
 ```
 
-Absolute paths matter in both cases — the client launches the server from an
-arbitrary working directory.
+Where that config lives varies by client — a JSON file in the client's config
+directory, a project-level file, or a settings UI. Some clients also offer a CLI
+subcommand that writes the same entry for you. Check your client's MCP
+documentation for the location; the fields above are the portable part.
 
-**Hosted / claude.ai**: claude.ai in the browser can't spawn a local process, so
-it needs the server reachable over HTTP as a custom connector. Set
-`MCP_TRANSPORT=streamable-http` (plus optional `MCP_HOST`/`MCP_PORT`) and deploy
-it somewhere always-on. [server/Dockerfile](server/Dockerfile) builds a
-self-contained CPU-only image with the model weights and the prebuilt index
-baked in:
+**Use absolute paths**, both for the interpreter and the script. The client
+launches the server from an arbitrary working directory, and the venv
+interpreter is what has the dependencies installed.
+
+Most clients need a restart or an explicit reconnect before a newly added server
+shows up. Once connected, ask a maintenance question and the assistant should
+call `search_saab_manual` on its own.
+
+#### Remote (Streamable HTTP)
+
+Hosted and browser-based clients can't spawn a local process, so they need the
+server reachable over the network. Set `MCP_TRANSPORT=streamable-http` (plus
+optional `MCP_HOST`/`MCP_PORT`) and deploy it somewhere always-on, then add the
+resulting URL in your client.
+
+[server/Dockerfile](server/Dockerfile) builds a self-contained CPU-only image
+with the model weights and the prebuilt index baked in:
 
 ```bash
 cd server
@@ -142,6 +163,11 @@ docker run -p 8000:8000 saab-rag
 ```
 
 Note the image includes the index, so it must be built *after* stage 2.
+
+> **The server has no authentication.** Anyone who can reach the URL can query
+> it. Put it behind a reverse proxy, network restriction, or auth layer before
+> exposing it publicly — and see [Legal](#legal) on redistributing manual
+> content.
 
 ## How to get your model name from SaabWisOnline
 
@@ -168,8 +194,7 @@ crawler is built to be a good citizen, and you should keep it that way:
 - **It identifies itself** with a descriptive User-Agent that says what it is
   and how to characterize the traffic.
 - **It rate-limits** to one request per second by default. Please don't lower
-  `--delay` to hammer the site; a full crawl is a few hours of background work,
-  not something you need to rush.
+  `--delay` to hammer the site; a full crawl is a few hours of background work.
 - **It stays in scope** — links are followed only within the requested
   `model/year` subtree, and external links are ignored.
 - **It backs off on errors** with exponential retry rather than retrying
@@ -188,10 +213,9 @@ original WIS export tool dumped each procedure.
 
 Planned hardening:
 
+- An additional engine filtering feature to only scrape engine specific content.
 - A nightly job that checks crawling is still possible and that the site
   structure hasn't changed, so breakage surfaces before someone needs the tool.
-- Support for additional models/years in a single index, with filtering by
-  model/year at query time.
 - A dedicated fast-path tool for the `dtcs/` section — structured lookup by
   fault code (`P0300`, `B3001-05`) rather than semantic search over prose, which
   is a poor fit for short, near-identical code descriptions.
@@ -232,5 +256,4 @@ If this project is useful to you, the people who actually deserve your money are
 the ones hosting the manuals:
 
 **[Donate to SaabWisOnline](https://saabwisonline.com)** — they host the
-documentation this entire project depends on, for free. Please support them
-before you consider supporting anything else here.
+documentation this entire project depends on, for free.
